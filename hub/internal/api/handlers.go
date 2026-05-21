@@ -14,8 +14,9 @@ import (
 )
 
 type Hub struct {
-	Store  *store.Store
-	APIKey string // Required API key for all management endpoints
+	Store         *store.Store
+	APIKey        string // Required API key for all management endpoints
+	PublicBaseURL string // HTTPS base URL agents use for binary downloads
 }
 
 func NewHub(s *store.Store, apiKey string) *Hub {
@@ -170,8 +171,7 @@ func (h *Hub) HandleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build policy actions based on agent's group assignment
-	actions := h.BuildPolicyActions(&req)
+	actions := h.BuildCheckinActions(&req)
 
 	resp := models.CheckinResponse{
 		Actions:            actions,

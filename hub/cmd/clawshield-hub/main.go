@@ -43,12 +43,21 @@ func main() {
 	if err := s.InitUpdateSchema(); err != nil {
 		log.Fatalf("failed to initialize update schema: %v", err)
 	}
+	if err := s.InitLockdownSchema(); err != nil {
+		log.Fatalf("failed to initialize lockdown schema: %v", err)
+	}
 
 	apiKey := os.Getenv("CLAWSHIELD_HUB_API_KEY")
 	if apiKey == "" {
 		log.Println("WARNING: CLAWSHIELD_HUB_API_KEY not set — management API endpoints will reject all requests")
 	}
 	hub := api.NewHub(s, apiKey)
+	if pub := os.Getenv("CLAWSHIELD_HUB_PUBLIC_URL"); pub != "" {
+		if err := api.ValidatePublicHubURL(pub); err != nil {
+			log.Fatalf("invalid CLAWSHIELD_HUB_PUBLIC_URL: %v", err)
+		}
+		hub.PublicBaseURL = pub
+	}
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
 	hub.RegisterPolicyRoutes(mux)

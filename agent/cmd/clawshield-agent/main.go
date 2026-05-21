@@ -7,151 +7,149 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/SleuthCo/clawshield/agent/internal/actions"
 	"github.com/SleuthCo/clawshield/agent/internal/checkin"
 	"github.com/SleuthCo/clawshield/agent/internal/collector"
 	"github.com/SleuthCo/clawshield/shared/models"
 )
 
+const agentVersion = "1.1.0"
+
 func main() {
-	// Define command-line flags
 	hubURL := flag.String("hub-url", "", "URL of the ClawShield Management Hub (required)")
 	enrollmentToken := flag.String("enrollment-token", "", "Enrollment token for first-time registration")
 	proxyURL := flag.String("proxy-url", "http://localhost:18789", "URL of the local ClawShield proxy")
 	auditDBPath := flag.String("audit-db-path", "/var/lib/clawshield/audit.db", "Path to the audit database file")
+	policyPath := flag.String("policy-path", "/var/lib/clawshield/policy.yaml", "Path to policy.yaml for Hub updates")
+	proxyBinary := flag.String("proxy-binary", "/usr/local/bin/clawshield-proxy", "Path to clawshield-proxy binary for updates")
 	checkinInterval := flag.Duration("checkin-interval", 60*time.Second, "Interval between check-ins to the Hub")
 	agentIDFile := flag.String("agent-id-file", "/var/lib/clawshield/agent-id", "File to store the agent ID")
+	encryptionKeyPath := flag.String("encryption-key-path", "/var/lib/clawshield/audit-encryption.key", "Path for audit encryption key material")
 
 	flag.Parse()
 
-	// Validate required flags
 	if *hubURL == "" {
 		log.Fatal("--hub-url is required")
 	}
+	if err := actions.RequireTLSHub(*hubURL); err != nil {
+		log.Fatalf("hub URL security: %v", err)
+	}
 
-	// Ensure directory for agent ID file exists
 	agentIDDir := filepath.Dir(*agentIDFile)
 	if agentIDDir != "." && agentIDDir != "" {
-		if err := os.MkdirAll(agentIDDir, 0755); err != nil {
+		if err := os.MkdirAll(agentIDDir, 0750); err != nil {
 			log.Fatalf("failed to create directory for agent ID file: %v", err)
 		}
 	}
 
-	// Get or create agent ID
 	agentID, err := getOrEnrollAgent(*hubURL, *enrollmentToken, *agentIDFile)
 	if err != nil {
 		log.Fatalf("failed to get or create agent ID: %v", err)
 	}
 
-	log.Printf("Agent ID: %s", agentID)
-
-	// Get hostname
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
 
-	// Create collector and client
 	coll := collector.NewCollector(*proxyURL, *auditDBPath)
 	hubClient := checkin.NewClient(*hubURL)
 
-	// Set up graceful shutdown
+	dispatcher, err := actions.NewDispatcher(actions.Config{
+		PolicyPath:        *policyPath,
+		EncryptionKeyPath: *encryptionKeyPath,
+		ProxyBinaryPath:   *proxyBinary,
+		HubURL:            *hubURL,
+	})
+	if err != nil {
+		log.Fatalf("dispatcher: %v", err)
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Main check-in loop
 	ticker := time.NewTicker(*checkinInterval)
 	defer ticker.Stop()
 
-	log.Printf("Starting check-in loop with interval %v", *checkinInterval)
+	log.Printf("ClawShield agent %s starting (agent_id=%s)", agentVersion, agentID)
 
 	for {
 		select {
 		case <-sigChan:
-			log.Println("Received shutdown signal, exiting gracefully")
+			log.Println("shutdown signal received")
 			return
 
 		case <-ticker.C:
-			// Collect status
 			status := coll.Collect()
 
-			// Build check-in request
 			health := models.AgentHealth{
 				Status:           "healthy",
 				AuditDBSizeBytes: status.AuditDBSize,
-				QueueDepth:       0,
+			}
+			if !status.ProxyReachable {
+				health.Status = "degraded"
+			}
+
+			clawVersion := "unknown"
+			if status.ProxyStatus != nil && status.ProxyStatus.PolicyVersion != "" {
+				clawVersion = status.ProxyStatus.PolicyVersion
 			}
 
 			req := &models.CheckinRequest{
 				AgentID:           agentID,
 				Hostname:          hostname,
-				ClawshieldVersion: "1.0.0", // TODO: get from actual proxy
-				AgentVersion:      "1.0.0", // TODO: get from actual agent version
+				ClawshieldVersion: clawVersion,
+				AgentVersion:      agentVersion,
 				Health:            health,
 			}
 
-			// Add proxy status fields if available
 			if status.ProxyStatus != nil {
 				req.PolicyHash = status.ProxyStatus.PolicyHash
 				req.PolicyVersion = status.ProxyStatus.PolicyVersion
 				req.UptimeSeconds = status.ProxyStatus.Uptime
 			}
 
-			// Check in with Hub
 			resp, err := hubClient.Checkin(req)
 			if err != nil {
 				log.Printf("check-in failed: %v", err)
 				continue
 			}
 
-			log.Printf("check-in successful: actions=%d, next_checkin=%d seconds", len(resp.Actions), resp.NextCheckinSeconds)
+			log.Printf("check-in ok: actions=%d next=%ds", len(resp.Actions), resp.NextCheckinSeconds)
 
-			// Log actions
-			for _, action := range resp.Actions {
-				log.Printf("  action: type=%s", action.Type)
+			if err := dispatcher.ApplyAll(resp.Actions); err != nil {
+				log.Printf("apply actions: %v", err)
 			}
-
-			// TODO: Phase 2 - apply actions
 		}
 	}
 }
 
-// getOrEnrollAgent checks if an agent ID file exists, and if not, enrolls with the Hub.
 func getOrEnrollAgent(hubURL, enrollmentToken, agentIDFile string) (string, error) {
-	// Try to read existing agent ID
 	if data, err := os.ReadFile(agentIDFile); err == nil {
-		agentID := string(data)
-		log.Printf("Using existing agent ID from %s", agentIDFile)
+		agentID := strings.TrimSpace(string(data))
+		log.Printf("using existing agent ID from %s", agentIDFile)
 		return agentID, nil
 	}
 
-	// Need to enroll
 	if enrollmentToken == "" {
-		return "", fmt.Errorf("agent ID not found in %s and no --enrollment-token provided for enrollment", agentIDFile)
+		return "", fmt.Errorf("agent ID not found and no --enrollment-token provided")
 	}
 
-	log.Println("Enrolling with Hub...")
-
-	// Get hostname for enrollment
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown"
-	}
-
-	// Call Hub enrollment endpoint
+	log.Println("enrolling with Hub...")
+	hostname, _ := os.Hostname()
 	hubClient := checkin.NewClient(hubURL)
 	resp, err := hubClient.Enroll(enrollmentToken, hostname, []string{})
 	if err != nil {
 		return "", fmt.Errorf("enrollment failed: %w", err)
 	}
 
-	// Save agent ID to file
 	if err := os.WriteFile(agentIDFile, []byte(resp.AgentID), 0600); err != nil {
-		return "", fmt.Errorf("failed to save agent ID to %s: %w", agentIDFile, err)
+		return "", fmt.Errorf("save agent ID: %w", err)
 	}
-
-	log.Printf("Successfully enrolled, agent ID: %s", resp.AgentID)
+	log.Printf("enrolled agent_id=%s", resp.AgentID)
 	return resp.AgentID, nil
 }
