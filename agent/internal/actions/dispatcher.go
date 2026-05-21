@@ -4,7 +4,6 @@ package actions
 import (
 	"crypto/rsa"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,9 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SleuthCo/clawshield/agent/internal/checkin"
 	"github.com/SleuthCo/clawshield/agent/internal/policy"
 	"github.com/SleuthCo/clawshield/agent/internal/updater"
+	"github.com/SleuthCo/clawshield/shared/auth"
 	"github.com/SleuthCo/clawshield/shared/models"
+	"github.com/SleuthCo/clawshield/shared/release"
 )
 
 // Config holds paths and trust material for the action dispatcher.
@@ -25,8 +27,10 @@ type Config struct {
 	EmergencyPolicyPath string // written on lockdown
 	ProxyBinaryPath     string
 	HubURL              string
-	PolicyPublicKey     *rsa.PublicKey
+	PolicyPublicKey      *rsa.PublicKey
+	ReleasePublicKey     *rsa.PublicKey
 	AllowedDownloadHosts []string // optional; empty = hub host only
+	HubClient            *checkin.Client // signed release downloads
 }
 
 // Dispatcher applies Hub actions sequentially; stops on first hard failure.
@@ -136,7 +140,13 @@ func (d *Dispatcher) applyKeyRotation(payload json.RawMessage) error {
 	if err := json.Unmarshal(payload, &k); err != nil {
 		return fmt.Errorf("decode key action: %w", err)
 	}
-	keyHex := strings.TrimSpace(k.KeyMaterial)
+	if d.cfg.HubClient == nil || len(d.cfg.HubClient.AgentSecret) != auth.AgentSecretSize {
+		return fmt.Errorf("agent secret required to unwrap key material")
+	}
+	keyHex, err := auth.UnwrapDEKForAgent(k.KeyMaterial, d.cfg.HubClient.AgentSecret)
+	if err != nil {
+		return fmt.Errorf("unwrap key material: %w", err)
+	}
 	if len(keyHex) != 64 {
 		return fmt.Errorf("key material must be 64 hex chars (32 bytes), got %d", len(keyHex))
 	}
@@ -172,9 +182,14 @@ func (d *Dispatcher) applyBinaryUpdate(payload json.RawMessage) error {
 	if err := d.validateDownloadURL(u.DownloadURL); err != nil {
 		return err
 	}
+	if d.cfg.ReleasePublicKey != nil {
+		if err := release.VerifyBinaryHashSignature(u.BinaryHash, u.Signature, d.cfg.ReleasePublicKey); err != nil {
+			return err
+		}
+	}
 	tmpPath := d.cfg.ProxyBinaryPath + ".download"
 	defer os.Remove(tmpPath)
-	if err := d.binary.Download(u.DownloadURL, tmpPath); err != nil {
+	if err := d.downloadBinary(u.DownloadURL, tmpPath); err != nil {
 		return err
 	}
 	if err := d.binary.Apply(tmpPath, u.BinaryHash); err != nil {
@@ -260,7 +275,22 @@ func RequireTLSHub(hubURL string) error {
 	return fmt.Errorf("hub URL must use https in production, got %q", u.Scheme)
 }
 
-// VerifyHubTLSConfig can be used when custom TLS is required.
+func (d *Dispatcher) downloadBinary(downloadURL, destPath string) error {
+	if d.cfg.HubClient != nil && len(d.cfg.HubClient.AgentSecret) == auth.AgentSecretSize {
+		u, err := url.Parse(downloadURL)
+		if err != nil {
+			return err
+		}
+		req, err := d.cfg.HubClient.NewAuthenticatedGET(downloadURL, u.Path)
+		if err != nil {
+			return err
+		}
+		return d.binary.DownloadRequest(req, destPath)
+	}
+	return d.binary.Download(downloadURL, destPath)
+}
+
+// VerifyHubTLSConfig performs a TLS handshake with default certificate verification.
 func VerifyHubTLSConfig(hubURL string) error {
 	u, err := url.Parse(hubURL)
 	if err != nil {
@@ -269,14 +299,12 @@ func VerifyHubTLSConfig(hubURL string) error {
 	if u.Scheme != "https" {
 		return nil
 	}
-	_, err = tls.Dial("tcp", u.Host, &tls.Config{
+	conn, err := tls.Dial("tcp", u.Host, &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no server certificate")
-			}
-			return nil
-		},
+		ServerName: u.Hostname(),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }

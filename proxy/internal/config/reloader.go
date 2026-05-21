@@ -24,6 +24,14 @@ func WithInterval(d time.Duration) ReloaderOption {
 	}
 }
 
+// WithEmergencyPolicy sets a path watched for Hub-issued emergency lockdown policy.
+// When the file exists, it overrides the enforced evaluator until removed.
+func WithEmergencyPolicy(path string) ReloaderOption {
+	return func(r *PolicyReloader) {
+		r.emergencyPath = path
+	}
+}
+
 // WithShadowMode enables shadow/canary mode where new policies are loaded
 // and evaluated in parallel (log-only) but not enforced.
 func WithShadowMode(enabled bool) ReloaderOption {
@@ -67,9 +75,11 @@ func WithOnError(fn func(err error)) ReloaderOption {
 //	decision, reason := eval.EvaluateWithContext(ctx, msg)
 type PolicyReloader struct {
 	policyPath     string
+	emergencyPath  string
 	interval       time.Duration
 	currentVersion atomic.Value // stores string
 	evalPtr        atomic.Value // stores *engine.Evaluator
+	emergencyPtr   atomic.Value // stores *engine.Evaluator when lockdown file present
 
 	// Shadow mode: load new policy but don't enforce it
 	shadowMode     bool
@@ -152,8 +162,11 @@ func (r *PolicyReloader) Stop() {
 }
 
 // GetEvaluator returns the currently active evaluator via atomic load.
-// This is safe to call from any goroutine and returns immediately.
+// Emergency lockdown policy takes precedence when loaded.
 func (r *PolicyReloader) GetEvaluator() *engine.Evaluator {
+	if v := r.emergencyPtr.Load(); v != nil {
+		return v.(*engine.Evaluator)
+	}
 	return r.evalPtr.Load().(*engine.Evaluator)
 }
 
@@ -202,6 +215,7 @@ func (r *PolicyReloader) watchLoop() {
 		case <-r.stopCh:
 			return
 		case <-ticker.C:
+			r.tryReloadEmergency()
 			if r.fileChanged() {
 				if _, err := r.tryReload(); err != nil {
 					log.Printf("ERROR: policy reload failed: %v (keeping current policy version %s)",
@@ -210,6 +224,30 @@ func (r *PolicyReloader) watchLoop() {
 			}
 		}
 	}
+}
+
+func (r *PolicyReloader) tryReloadEmergency() {
+	if r.emergencyPath == "" {
+		return
+	}
+	info, err := os.Stat(r.emergencyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			r.emergencyPtr.Store(nil)
+		}
+		return
+	}
+	if info.IsDir() {
+		return
+	}
+	policy, version, err := LoadWithVersion(r.emergencyPath)
+	if err != nil {
+		log.Printf("ERROR: emergency policy load failed: %v", err)
+		return
+	}
+	eval := engine.NewEvaluator(policy)
+	eval.SetPolicyVersion(version)
+	r.emergencyPtr.Store(eval)
 }
 
 // fileChanged checks if the policy file has been modified since the last check.

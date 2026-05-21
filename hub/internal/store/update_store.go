@@ -71,6 +71,22 @@ func (s *Store) GetRelease(releaseID string) (*models.UpdateRelease, error) {
 	return &r, nil
 }
 
+// GetReleaseByVersion returns a release by version label, or nil if not found.
+func (s *Store) GetReleaseByVersion(version string) (*models.UpdateRelease, error) {
+	var r models.UpdateRelease
+	err := s.db.QueryRow(
+		`SELECT release_id, version, binary_hash, signature, release_notes, created_at
+		 FROM update_releases WHERE version = ? ORDER BY created_at DESC LIMIT 1`, version).Scan(
+		&r.ReleaseID, &r.Version, &r.BinaryHash, &r.Signature, &r.ReleaseNotes, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // ListReleases returns all releases ordered by created_at DESC.
 func (s *Store) ListReleases() ([]models.UpdateRelease, error) {
 	rows, err := s.db.Query(

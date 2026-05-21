@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -11,16 +12,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/SleuthCo/clawshield/hub/internal/models"
 	"github.com/SleuthCo/clawshield/hub/internal/store"
+	"github.com/SleuthCo/clawshield/shared/auth"
 )
+
+const maxCheckinBodyBytes = 1 << 20 // 1 MiB
 
 type Hub struct {
 	Store         *store.Store
 	APIKey        string // Required API key for all management endpoints
 	PublicBaseURL string // HTTPS base URL agents use for binary downloads
+	MasterKey     []byte // Hub master key for at-rest DEK and agent secret encryption
+	ReleasesDir   string // Directory containing versioned release binaries
+	RequireCheckinAuth bool
 }
 
-func NewHub(s *store.Store, apiKey string) *Hub {
-	return &Hub{Store: s, APIKey: apiKey}
+func NewHub(s *store.Store, apiKey string, masterKey []byte) *Hub {
+	requireAuth := true
+	return &Hub{
+		Store:              s,
+		APIKey:             apiKey,
+		MasterKey:          masterKey,
+		RequireCheckinAuth: requireAuth,
+	}
 }
 
 // requireAPIKey is middleware that checks for a valid Bearer token.
@@ -52,13 +65,15 @@ func (h *Hub) RegisterRoutes(mux *http.ServeMux) {
 	// Unauthenticated
 	mux.HandleFunc("GET /api/v1/health", h.HandleHealth)
 
-	// Agent-authenticated (token or agent ID)
+	// Agent-authenticated
 	mux.HandleFunc("POST /api/v1/enroll", h.HandleEnroll)
 	mux.HandleFunc("POST /api/v1/checkin", h.HandleCheckin)
+	mux.HandleFunc("GET /api/v1/releases/{version}/binary", h.HandleDownloadReleaseBinary)
 
 	// Management endpoints — require API key
 	mux.HandleFunc("GET /api/v1/agents", h.requireAPIKey(h.HandleListAgents))
 	mux.HandleFunc("GET /api/v1/agents/", h.requireAPIKey(h.HandleGetAgent))
+	mux.HandleFunc("POST /api/v1/agents/{id}/lockdown", h.requireAPIKey(h.HandleAgentLockdown))
 	mux.HandleFunc("GET /api/v1/tokens", h.requireAPIKey(h.HandleListTokens))
 	mux.HandleFunc("POST /api/v1/tokens", h.requireAPIKey(h.HandleCreateToken))
 }
@@ -124,9 +139,33 @@ func (h *Hub) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	agentSecret, err := auth.GenerateAgentSecret()
+	if err != nil {
+		log.Printf("error generating agent secret: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if len(h.MasterKey) != auth.MasterKeySize {
+		log.Printf("hub master key not configured")
+		writeError(w, http.StatusServiceUnavailable, "hub master key not configured")
+		return
+	}
+	secretEnc, err := auth.SealAgentSecret(agentSecret, h.MasterKey)
+	if err != nil {
+		log.Printf("error sealing agent secret: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if err := h.Store.SetAgentSecretEnc(agentID, secretEnc); err != nil {
+		log.Printf("error storing agent secret: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	resp := models.EnrollmentResponse{
 		AgentID:         agentID,
 		CheckinInterval: 60,
+		AgentSecret:     strings.ToLower(hexEncode(agentSecret)),
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -139,8 +178,18 @@ func (h *Hub) HandleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxCheckinBodyBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(body) > maxCheckinBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "check-in body too large")
+		return
+	}
+
 	var req models.CheckinRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
@@ -149,6 +198,13 @@ func (h *Hub) HandleCheckin(w http.ResponseWriter, r *http.Request) {
 	if !validateID(req.AgentID) {
 		writeError(w, http.StatusBadRequest, "invalid ID format")
 		return
+	}
+
+	if h.RequireCheckinAuth {
+		if err := h.verifyCheckinAuth(r, req.AgentID, body); err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized check-in")
+			return
+		}
 	}
 
 	// Verify agent exists

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/SleuthCo/clawshield/agent/internal/actions"
 	"github.com/SleuthCo/clawshield/agent/internal/checkin"
 	"github.com/SleuthCo/clawshield/agent/internal/collector"
+	"github.com/SleuthCo/clawshield/agent/internal/trust"
 	"github.com/SleuthCo/clawshield/shared/models"
 )
 
@@ -28,7 +30,10 @@ func main() {
 	proxyBinary := flag.String("proxy-binary", "/usr/local/bin/clawshield-proxy", "Path to clawshield-proxy binary for updates")
 	checkinInterval := flag.Duration("checkin-interval", 60*time.Second, "Interval between check-ins to the Hub")
 	agentIDFile := flag.String("agent-id-file", "/var/lib/clawshield/agent-id", "File to store the agent ID")
+	agentSecretFile := flag.String("agent-secret-file", "/var/lib/clawshield/agent-secret", "File to store the agent check-in secret (0600)")
 	encryptionKeyPath := flag.String("encryption-key-path", "/var/lib/clawshield/audit-encryption.key", "Path for audit encryption key material")
+	policyPubKeyPath := flag.String("policy-pubkey", os.Getenv("CLAWSHIELD_POLICY_PUBLIC_KEY"), "PEM file with Hub policy signing public key")
+	releasePubKeyPath := flag.String("release-pubkey", os.Getenv("CLAWSHIELD_RELEASE_PUBLIC_KEY"), "PEM file with release binary signing public key")
 
 	flag.Parse()
 
@@ -46,24 +51,40 @@ func main() {
 		}
 	}
 
-	agentID, err := getOrEnrollAgent(*hubURL, *enrollmentToken, *agentIDFile)
+	hubClient := checkin.NewClient(*hubURL)
+	agentID, err := getOrEnrollAgent(hubClient, *enrollmentToken, *agentIDFile, *agentSecretFile)
 	if err != nil {
 		log.Fatalf("failed to get or create agent ID: %v", err)
 	}
+	hubClient.SetAgentCredentials(agentID, hubClient.AgentSecret)
 
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
 
+	policyPub, err := trust.LoadRSAPublicKeyPEM(*policyPubKeyPath)
+	if err != nil {
+		log.Fatalf("policy public key: %v", err)
+	}
+	if policyPub == nil {
+		log.Fatal("policy public key required: set --policy-pubkey or CLAWSHIELD_POLICY_PUBLIC_KEY")
+	}
+	releasePub, err := trust.LoadRSAPublicKeyPEM(*releasePubKeyPath)
+	if err != nil {
+		log.Fatalf("release public key: %v", err)
+	}
+
 	coll := collector.NewCollector(*proxyURL, *auditDBPath)
-	hubClient := checkin.NewClient(*hubURL)
 
 	dispatcher, err := actions.NewDispatcher(actions.Config{
 		PolicyPath:        *policyPath,
 		EncryptionKeyPath: *encryptionKeyPath,
 		ProxyBinaryPath:   *proxyBinary,
 		HubURL:            *hubURL,
+		PolicyPublicKey:   policyPub,
+		ReleasePublicKey:  releasePub,
+		HubClient:         hubClient,
 	})
 	if err != nil {
 		log.Fatalf("dispatcher: %v", err)
@@ -94,23 +115,20 @@ func main() {
 				health.Status = "degraded"
 			}
 
-			clawVersion := "unknown"
-			if status.ProxyStatus != nil && status.ProxyStatus.PolicyVersion != "" {
-				clawVersion = status.ProxyStatus.PolicyVersion
-			}
-
 			req := &models.CheckinRequest{
 				AgentID:           agentID,
 				Hostname:          hostname,
-				ClawshieldVersion: clawVersion,
+				ClawshieldVersion: status.ProxyVersion(),
 				AgentVersion:      agentVersion,
 				Health:            health,
+				MetricsSummary:    status.MetricsSummary,
 			}
 
 			if status.ProxyStatus != nil {
 				req.PolicyHash = status.ProxyStatus.PolicyHash
 				req.PolicyVersion = status.ProxyStatus.PolicyVersion
 				req.UptimeSeconds = status.ProxyStatus.Uptime
+				req.EncryptionKeyID = status.EncryptionKeyID
 			}
 
 			resp, err := hubClient.Checkin(req)
@@ -128,9 +146,16 @@ func main() {
 	}
 }
 
-func getOrEnrollAgent(hubURL, enrollmentToken, agentIDFile string) (string, error) {
+func getOrEnrollAgent(hubClient *checkin.Client, enrollmentToken, agentIDFile, agentSecretFile string) (string, error) {
 	if data, err := os.ReadFile(agentIDFile); err == nil {
 		agentID := strings.TrimSpace(string(data))
+		secretHex, err := os.ReadFile(agentSecretFile)
+		if err != nil {
+			return "", fmt.Errorf("agent ID present but secret file missing (%s): enroll again or restore secret", agentSecretFile)
+		}
+		if err := hubClient.SetAgentSecretHex(strings.TrimSpace(string(secretHex))); err != nil {
+			return "", err
+		}
 		log.Printf("using existing agent ID from %s", agentIDFile)
 		return agentID, nil
 	}
@@ -141,7 +166,6 @@ func getOrEnrollAgent(hubURL, enrollmentToken, agentIDFile string) (string, erro
 
 	log.Println("enrolling with Hub...")
 	hostname, _ := os.Hostname()
-	hubClient := checkin.NewClient(hubURL)
 	resp, err := hubClient.Enroll(enrollmentToken, hostname, []string{})
 	if err != nil {
 		return "", fmt.Errorf("enrollment failed: %w", err)
@@ -149,6 +173,15 @@ func getOrEnrollAgent(hubURL, enrollmentToken, agentIDFile string) (string, erro
 
 	if err := os.WriteFile(agentIDFile, []byte(resp.AgentID), 0600); err != nil {
 		return "", fmt.Errorf("save agent ID: %w", err)
+	}
+	if resp.AgentSecret == "" {
+		return "", fmt.Errorf("hub did not return agent_secret")
+	}
+	if err := os.WriteFile(agentSecretFile, []byte(resp.AgentSecret), 0600); err != nil {
+		return "", fmt.Errorf("save agent secret: %w", err)
+	}
+	if _, err := hex.DecodeString(resp.AgentSecret); err != nil {
+		return "", fmt.Errorf("invalid agent secret from hub: %w", err)
 	}
 	log.Printf("enrolled agent_id=%s", resp.AgentID)
 	return resp.AgentID, nil

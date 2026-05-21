@@ -9,6 +9,7 @@ import (
 
 	"github.com/SleuthCo/clawshield/hub/internal/models"
 	sharedmodels "github.com/SleuthCo/clawshield/shared/models"
+	"github.com/SleuthCo/clawshield/shared/auth"
 )
 
 // BuildCheckinActions returns all pending actions for an agent (policy, keys, updates, lockdown).
@@ -44,16 +45,24 @@ func (h *Hub) buildKeyRotationAction(req *models.CheckinRequest) *models.Action 
 	if req.EncryptionKeyID == active.KeyID {
 		return nil
 	}
-	// EncryptedKey stores hex-encoded 32-byte key for distribution (TLS in transit).
-	// SECURITY: Production should wrap with Hub KMS; see docs/security-decisions.md.
-	material := strings.TrimSpace(active.EncryptedKey)
-	if len(material) != 64 {
-		log.Printf("skip key rotation for agent %s: active key material invalid length", req.AgentID)
+	dekHex, err := h.unwrapStoredDEK(active.EncryptedKey)
+	if err != nil {
+		log.Printf("skip key rotation for agent %s: %v", req.AgentID, err)
+		return nil
+	}
+	agentSecret, err := h.agentSecretFor(req.AgentID)
+	if err != nil {
+		log.Printf("skip key rotation for agent %s: %v", req.AgentID, err)
+		return nil
+	}
+	wrapped, err := auth.WrapDEKForAgent(dekHex, agentSecret)
+	if err != nil {
+		log.Printf("skip key rotation for agent %s: wrap failed: %v", req.AgentID, err)
 		return nil
 	}
 	payload, _ := json.Marshal(sharedmodels.KeyRotateAction{
 		KeyID:       active.KeyID,
-		KeyMaterial: material,
+		KeyMaterial: wrapped,
 	})
 	return &models.Action{Type: "rotate_encryption_key", Payload: payload}
 }
@@ -61,6 +70,10 @@ func (h *Hub) buildKeyRotationAction(req *models.CheckinRequest) *models.Action 
 func (h *Hub) buildBinaryUpdateAction(req *models.CheckinRequest) *models.Action {
 	task, err := h.Store.GetPendingUpdateForAgent(req.AgentID)
 	if err != nil || task == nil {
+		return nil
+	}
+	if !auth.ValidateReleaseVersion(task.TargetVersion) {
+		log.Printf("skip binary update for agent %s: invalid target version %q", req.AgentID, task.TargetVersion)
 		return nil
 	}
 	downloadURL := fmt.Sprintf("%s/api/v1/releases/%s/binary", strings.TrimRight(h.hubBaseURL(), "/"), task.TargetVersion)

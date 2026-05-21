@@ -19,6 +19,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/SleuthCo/clawshield/proxy/internal/audit/crypto/keyprovider"
 	"github.com/SleuthCo/clawshield/proxy/internal/audit/hashlined"
 	"github.com/SleuthCo/clawshield/proxy/internal/audit/sqlite"
 	"github.com/SleuthCo/clawshield/proxy/internal/config"
@@ -172,14 +173,21 @@ func main() {
 		}()
 
 		// Create policy reloader for hot-reload support
-		reloader := config.NewPolicyReloader(fullPolicyPath, evaluator, policyVersion,
+		reloaderOpts := []config.ReloaderOption{
 			config.WithOnReload(func(oldVer, newVer string) {
 				log.Printf("Policy hot-reloaded: %s -> %s", oldVer, newVer)
 			}),
 			config.WithOnError(func(err error) {
 				log.Printf("WARNING: policy reload failed: %v", err)
 			}),
-		)
+		}
+		if config.ShadowModeEnabled() {
+			reloaderOpts = append(reloaderOpts, config.WithShadowMode(true))
+			log.Printf("Policy shadow/canary mode enabled (CLAWSHIELD_POLICY_SHADOW)")
+		}
+		emergencyPath := filepath.Join(filepath.Dir(fullPolicyPath), "policy.emergency.yaml")
+		reloaderOpts = append(reloaderOpts, config.WithEmergencyPolicy(emergencyPath))
+		reloader := config.NewPolicyReloader(fullPolicyPath, evaluator, policyVersion, reloaderOpts...)
 		reloader.Start()
 		defer reloader.Stop()
 
@@ -514,6 +522,13 @@ func initAudit(auditDBPath string) (*sqlite.Writer, *sql.DB) {
 	writer, err := sqlite.NewWriterWithPath(db, auditDBPath)
 	if err != nil {
 		log.Fatalf("Failed to create audit writer: %v", err)
+	}
+	enc, err := keyprovider.NewFieldEncryptorFromProvider()
+	if err != nil {
+		log.Printf("Audit field encryption disabled: %v", err)
+	} else {
+		writer.SetEncryptor(enc)
+		log.Printf("Audit field encryption enabled (provider=%s)", os.Getenv("CLAWSHIELD_KEY_PROVIDER"))
 	}
 	log.Println("Audit logging enabled:", auditDBPath)
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/SleuthCo/clawshield/hub/internal/models"
+	"github.com/SleuthCo/clawshield/shared/auth"
 )
 
 // RegisterUpdateRoutes registers all update-related routes with the mux.
@@ -41,6 +42,10 @@ func (h *Hub) HandleCreateRelease(w http.ResponseWriter, r *http.Request) {
 
 	if req.Version == "" || req.BinaryHash == "" {
 		writeError(w, http.StatusBadRequest, "version and binary_hash are required")
+		return
+	}
+	if !auth.ValidateReleaseVersion(req.Version) {
+		writeError(w, http.StatusBadRequest, "invalid version format")
 		return
 	}
 

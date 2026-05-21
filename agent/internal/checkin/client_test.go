@@ -100,6 +100,10 @@ func TestCheckin_Success(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL)
+	if err := client.SetAgentSecretHex("abababababababababababababababababababababababababababababababab"); err != nil {
+		t.Fatal(err)
+	}
+	client.SetAgentCredentials("agent-12345", client.AgentSecret)
 	health := models.AgentHealth{
 		Status:           "healthy",
 		AuditDBSizeBytes: 1024,
@@ -143,6 +147,10 @@ func TestCheckin_WithActions(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL)
+	if err := client.SetAgentSecretHex("abababababababababababababababababababababababababababababababab"); err != nil {
+		t.Fatal(err)
+	}
+	client.SetAgentCredentials("agent-12345", client.AgentSecret)
 	health := models.AgentHealth{
 		Status:           "healthy",
 		AuditDBSizeBytes: 1024,

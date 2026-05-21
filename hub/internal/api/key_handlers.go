@@ -58,10 +58,17 @@ func (h *Hub) HandleCreateKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	storedKey, err := h.SealDEKForStorage(req.EncryptedKey)
+	if err != nil {
+		log.Printf("error sealing encryption key: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	key := models.EncryptionKey{
 		KeyID:        keyID,
 		GroupID:      req.GroupID,
-		EncryptedKey: req.EncryptedKey,
+		EncryptedKey: storedKey,
 		Status:       "active",
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    expiresAt,

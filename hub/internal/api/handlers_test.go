@@ -2,14 +2,28 @@ package api
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/SleuthCo/clawshield/hub/internal/models"
 	"github.com/SleuthCo/clawshield/hub/internal/store"
+	"github.com/SleuthCo/clawshield/shared/auth"
 )
+
+// testMasterKey is a fixed 32-byte key for unit tests only.
+var testMasterKey = bytesRepeat(0xab, 32)
+
+func bytesRepeat(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
 
 // setupTestHub creates a test Hub with an in-memory SQLite database.
 func setupTestHub(t *testing.T) *Hub {
@@ -17,7 +31,26 @@ func setupTestHub(t *testing.T) *Hub {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	return NewHub(s, "test-api-key")
+	_ = s.InitAgentAuthSchema()
+	_ = s.InitPolicySchema()
+	_ = s.InitKeySchema()
+	_ = s.InitUpdateSchema()
+	_ = s.InitLockdownSchema()
+	return NewHub(s, "test-api-key", testMasterKey)
+}
+
+func signCheckinBody(t *testing.T, hub *Hub, agentID string, body []byte) string {
+	t.Helper()
+	enc, err := hub.Store.GetAgentSecretEnc(agentID)
+	if err != nil || enc == "" {
+		t.Fatalf("agent secret missing for %s", agentID)
+	}
+	secret, err := auth.OpenAgentSecret(enc, hub.MasterKey)
+	if err != nil {
+		t.Fatalf("open agent secret: %v", err)
+	}
+	ts := time.Now().UTC().Unix()
+	return auth.FormatAuthorizationHeader(agentID, ts, auth.SignCheckin(secret, agentID, ts, body))
 }
 
 // TestHandleHealth verifies the health endpoint returns 200 with status ok.
@@ -79,6 +112,12 @@ func TestHandleEnroll_Success(t *testing.T) {
 
 	if resp.CheckinInterval != 60 {
 		t.Errorf("expected checkin_interval 60, got %d", resp.CheckinInterval)
+	}
+	if resp.AgentSecret == "" {
+		t.Error("expected agent_secret in enrollment response")
+	}
+	if _, err := hex.DecodeString(resp.AgentSecret); err != nil || len(resp.AgentSecret) != 64 {
+		t.Errorf("expected 64-char hex agent_secret, got len=%d", len(resp.AgentSecret))
 	}
 }
 
@@ -157,6 +196,7 @@ func TestHandleCheckin_Success(t *testing.T) {
 	}
 	checkinBody, _ := json.Marshal(checkinReq)
 	checkinHTTPReq := httptest.NewRequest(http.MethodPost, "/api/v1/checkin", bytes.NewReader(checkinBody))
+	checkinHTTPReq.Header.Set("Authorization", signCheckinBody(t, hub, agentID, checkinBody))
 	checkinW := httptest.NewRecorder()
 
 	hub.HandleCheckin(checkinW, checkinHTTPReq)
@@ -179,7 +219,7 @@ func TestHandleCheckin_Success(t *testing.T) {
 	}
 }
 
-// TestHandleCheckin_UnknownAgent verifies check-in fails for unknown agent.
+// TestHandleCheckin_UnknownAgent verifies check-in fails without valid auth.
 func TestHandleCheckin_UnknownAgent(t *testing.T) {
 	hub := setupTestHub(t)
 
@@ -193,8 +233,8 @@ func TestHandleCheckin_UnknownAgent(t *testing.T) {
 
 	hub.HandleCheckin(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected status 404, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401 without auth, got %d", w.Code)
 	}
 
 	var resp models.ErrorResponse
@@ -316,6 +356,7 @@ func TestHandleGetAgent_Success(t *testing.T) {
 	}
 	checkinBody, _ := json.Marshal(checkinReq)
 	checkinHTTPReq := httptest.NewRequest(http.MethodPost, "/api/v1/checkin", bytes.NewReader(checkinBody))
+	checkinHTTPReq.Header.Set("Authorization", signCheckinBody(t, hub, agentID, checkinBody))
 	checkinW := httptest.NewRecorder()
 	hub.HandleCheckin(checkinW, checkinHTTPReq)
 

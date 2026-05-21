@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const maxBinaryDownloadBytes = 100 << 20 // 100 MiB
+
 // Updater handles downloading and applying binary updates.
 type Updater struct {
 	CurrentBinaryPath string
@@ -42,7 +44,16 @@ func (u *Updater) VerifyHash(filePath, expectedHash string) error {
 
 // Download downloads a file from a URL and saves it to destPath.
 func (u *Updater) Download(url, destPath string) error {
-	resp, err := u.Client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	return u.DownloadRequest(req, destPath)
+}
+
+// DownloadRequest downloads using a pre-built request (e.g. signed Hub GET).
+func (u *Updater) DownloadRequest(req *http.Request, destPath string) error {
+	resp, err := u.Client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
@@ -58,10 +69,14 @@ func (u *Updater) Download(url, destPath string) error {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	limited := io.LimitReader(resp.Body, maxBinaryDownloadBytes+1)
+	n, err := io.Copy(out, limited)
+	if err != nil {
 		return fmt.Errorf("write file: %w", err)
 	}
-
+	if n > maxBinaryDownloadBytes {
+		return fmt.Errorf("download exceeds %d byte limit", maxBinaryDownloadBytes)
+	}
 	return nil
 }
 

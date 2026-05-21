@@ -15,6 +15,7 @@ import (
 
 	"github.com/SleuthCo/clawshield/hub/internal/api"
 	"github.com/SleuthCo/clawshield/hub/internal/store"
+	"github.com/SleuthCo/clawshield/shared/auth"
 )
 
 //go:embed static
@@ -46,12 +47,25 @@ func main() {
 	if err := s.InitLockdownSchema(); err != nil {
 		log.Fatalf("failed to initialize lockdown schema: %v", err)
 	}
+	if err := s.InitAgentAuthSchema(); err != nil {
+		log.Fatalf("failed to initialize agent auth schema: %v", err)
+	}
+
+	masterKeyHex := os.Getenv("CLAWSHIELD_HUB_MASTER_KEY")
+	if masterKeyHex == "" {
+		log.Fatal("CLAWSHIELD_HUB_MASTER_KEY is required (64-char hex, 32 bytes)")
+	}
+	masterKey, err := auth.ParseMasterKey(masterKeyHex)
+	if err != nil {
+		log.Fatalf("invalid CLAWSHIELD_HUB_MASTER_KEY: %v", err)
+	}
 
 	apiKey := os.Getenv("CLAWSHIELD_HUB_API_KEY")
 	if apiKey == "" {
 		log.Println("WARNING: CLAWSHIELD_HUB_API_KEY not set — management API endpoints will reject all requests")
 	}
-	hub := api.NewHub(s, apiKey)
+	hub := api.NewHub(s, apiKey, masterKey)
+	hub.ReleasesDir = os.Getenv("CLAWSHIELD_RELEASES_DIR")
 	if pub := os.Getenv("CLAWSHIELD_HUB_PUBLIC_URL"); pub != "" {
 		if err := api.ValidatePublicHubURL(pub); err != nil {
 			log.Fatalf("invalid CLAWSHIELD_HUB_PUBLIC_URL: %v", err)

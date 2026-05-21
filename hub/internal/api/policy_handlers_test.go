@@ -336,6 +336,7 @@ func TestCheckinWithPolicyUpdate(t *testing.T) {
 	}
 	body, _ = json.Marshal(checkinReq)
 	req = httptest.NewRequest("POST", "/api/v1/checkin", bytes.NewReader(body))
+	req.Header.Set("Authorization", signCheckinBody(t, h, agentID, body))
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -370,6 +371,7 @@ func TestCheckinWithPolicyUpdate(t *testing.T) {
 	checkinReq.PolicyHash = "abc123"
 	body, _ = json.Marshal(checkinReq)
 	req = httptest.NewRequest("POST", "/api/v1/checkin", bytes.NewReader(body))
+	req.Header.Set("Authorization", signCheckinBody(t, h, agentID, body))
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 

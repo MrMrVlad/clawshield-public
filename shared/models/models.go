@@ -75,9 +75,11 @@ type EnrollmentRequest struct {
 
 // EnrollmentResponse is returned after successful enrollment.
 type EnrollmentResponse struct {
-	AgentID       string `json:"agent_id"`
-	HubURL        string `json:"hub_url"`
-	CheckinInterval int  `json:"checkin_interval_seconds"`
+	AgentID         string `json:"agent_id"`
+	HubURL          string `json:"hub_url"`
+	CheckinInterval int    `json:"checkin_interval_seconds"`
+	// AgentSecret is a one-time hex-encoded secret for signing check-ins. Store at 0600 and never log.
+	AgentSecret string `json:"agent_secret"`
 }
 
 // AgentCheckin is a recorded check-in event.
