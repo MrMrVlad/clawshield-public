@@ -259,10 +259,6 @@ func TestRedactArguments(t *testing.T) {
 }
 
 func TestHashArguments_ComplexNesting(t *testing.T) {
-	t.Skip("KNOWN LIMITATION: nested field redaction is not yet implemented — " +
-		"nested sensitive fields like {\"outer\": {\"apikey\": \"secret\"}} are hashed " +
-		"with the secret value intact. Unskip this test when nested redaction is added.")
-
 	// When nested redaction IS implemented, these two inputs should produce
 	// the same hash because the nested apikey should be redacted in both.
 	input1 := `{"outer": {"apikey": "secret1"}, "url": "test"}`
