@@ -172,14 +172,19 @@ func main() {
 		}()
 
 		// Create policy reloader for hot-reload support
-		reloader := config.NewPolicyReloader(fullPolicyPath, evaluator, policyVersion,
+		reloaderOpts := []config.ReloaderOption{
 			config.WithOnReload(func(oldVer, newVer string) {
 				log.Printf("Policy hot-reloaded: %s -> %s", oldVer, newVer)
 			}),
 			config.WithOnError(func(err error) {
 				log.Printf("WARNING: policy reload failed: %v", err)
 			}),
-		)
+		}
+		if config.ShadowModeEnabled() {
+			reloaderOpts = append(reloaderOpts, config.WithShadowMode(true))
+			log.Printf("Policy shadow/canary mode enabled (CLAWSHIELD_POLICY_SHADOW)")
+		}
+		reloader := config.NewPolicyReloader(fullPolicyPath, evaluator, policyVersion, reloaderOpts...)
 		reloader.Start()
 		defer reloader.Stop()
 

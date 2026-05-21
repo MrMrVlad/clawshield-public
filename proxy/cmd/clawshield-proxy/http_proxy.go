@@ -126,6 +126,21 @@ func (p *httpProxy) getEvaluator() *engine.Evaluator {
 	return p.evaluator
 }
 
+// runShadowEvaluation compares shadow policy outcome to the enforced decision (log-only).
+func (p *httpProxy) runShadowEvaluation(ctx context.Context, message, activeDecision, method string) {
+	if p.reloader == nil {
+		return
+	}
+	shadowEval := p.reloader.GetShadowEvaluator()
+	if shadowEval == nil {
+		return
+	}
+	shadowDecision, shadowReason, _ := shadowEval.EvaluateWithDetails(ctx, message)
+	shadowVer := shadowEval.PolicyVersion()
+	config.LogShadowDecision(shadowVer, shadowDecision, shadowReason, method)
+	p.metrics.RecordShadowEvaluation(shadowDecision, activeDecision)
+}
+
 // getPolicyVersion returns the current policy version hash for audit logging.
 func (p *httpProxy) getPolicyVersion() string {
 	if p.reloader != nil {
@@ -842,6 +857,7 @@ func (p *httpProxy) proxyClientToUpstream(ctx context.Context, client, upstream 
 		evalStart := time.Now()
 		evalCtx, evalCancel := context.WithTimeout(ctx, time.Duration(p.timeoutMs)*time.Millisecond)
 		decision, reason, details := p.getEvaluator().EvaluateWithDetails(evalCtx, message)
+		p.runShadowEvaluation(evalCtx, message, decision, rpc.Method)
 		evalCancel()
 
 		method := rpc.Method

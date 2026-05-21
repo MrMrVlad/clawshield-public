@@ -60,6 +60,10 @@ type Collector struct {
 	evaluationTimeouts  atomic.Int64
 	upstreamErrors      atomic.Int64
 
+	// Shadow / canary policy
+	shadowEvaluations atomic.Int64
+	shadowMismatches  atomic.Int64
+
 	// Custom labeled counters
 	labeledMu      sync.RWMutex
 	deniedByTool   map[string]*atomic.Int64
@@ -237,6 +241,14 @@ func (c *Collector) RecordAdaptiveAction() {
 	c.adaptiveActionsTriggered.Add(1)
 }
 
+// RecordShadowEvaluation records shadow policy evaluation; counts mismatches vs active.
+func (c *Collector) RecordShadowEvaluation(shadowDecision, activeDecision string) {
+	c.shadowEvaluations.Add(1)
+	if shadowDecision != activeDecision {
+		c.shadowMismatches.Add(1)
+	}
+}
+
 // --- Prometheus Exposition ---
 
 // Handler returns an http.Handler that serves metrics in Prometheus exposition format.
@@ -304,6 +316,8 @@ func (c *Collector) Render() string {
 	writeCounter(&b, "clawshield_crosslayer_events_received_total", "Total cross-layer events received", c.crossLayerEventsReceived.Load())
 	writeCounter(&b, "clawshield_crosslayer_events_sent_total", "Total cross-layer events sent", c.crossLayerEventsSent.Load())
 	writeCounter(&b, "clawshield_adaptive_actions_total", "Total adaptive response actions triggered", c.adaptiveActionsTriggered.Load())
+	writeCounter(&b, "clawshield_shadow_evaluations_total", "Total shadow policy evaluations", c.shadowEvaluations.Load())
+	writeCounter(&b, "clawshield_shadow_mismatches_total", "Shadow vs active decision mismatches", c.shadowMismatches.Load())
 
 	// Denied by tool (labeled)
 	c.labeledMu.RLock()
