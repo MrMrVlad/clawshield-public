@@ -70,10 +70,10 @@ classification:
     - pattern: 'ghp_[A-Za-z0-9]{36,}'
       level: RESTRICTED
       label: GitHub PAT
-    - pattern: 'xoxb-[0-9]{10,}-[A-Za-z0-9]{20,}'
+    - pattern: 'xoxb-[0-9]{10,}-[A-Za-z0-9-]{20,}'
       level: RESTRICTED
       label: Slack bot token
-    - pattern: 'xoxp-[0-9]{10,}-[A-Za-z0-9]{20,}'
+    - pattern: 'xoxp-[0-9]{10,}-[A-Za-z0-9-]{20,}'
       level: RESTRICTED
       label: Slack user token
     - pattern: 'glpat-[A-Za-z0-9_-]{20,}'

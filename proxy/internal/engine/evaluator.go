@@ -33,6 +33,7 @@ type Policy struct {
 	MalwareScan     *scanner.MalwareScanConfig      `yaml:"malware_scan"`
 	SecretsScan     *scanner.SecretsConfig           `yaml:"secrets_scan"`
 	PIIScan         *scanner.PIIConfig               `yaml:"pii_scan"`
+	CitationScan    *scanner.CitationScanConfig      `yaml:"citation_scan"`
 
 	// OpenClaw gateway integration
 	OpenClaw *OpenClawConfig `yaml:"openclaw"`
@@ -84,6 +85,7 @@ type Evaluator struct {
 	malwareScanner     *scanner.MalwareScanner
 	secretsScanner     *scanner.SecretsScanner
 	piiScanner         *scanner.PIIScanner
+	citationScanner    *scanner.CitationScanner
 
 	// Cross-layer adaptive override fields
 	// Cross-layer adaptive override fields — allow temporary policy changes
@@ -140,6 +142,7 @@ func NewEvaluator(policy *Policy) *Evaluator {
 	e.malwareScanner = scanner.NewMalwareScanner(policy.MalwareScan)
 	e.secretsScanner = scanner.NewSecretsScanner(policy.SecretsScan)
 	e.piiScanner = scanner.NewPIIScanner(policy.PIIScan)
+	e.citationScanner = scanner.NewCitationScanner(policy.CitationScan)
 
 	return e
 }
@@ -592,10 +595,43 @@ func (e *Evaluator) EvaluateResponse(ctx context.Context, method string, respons
 		}
 	}
 
+	// Citation/reference grounding (log + audit; does not block by default)
+	if e.citationScanner != nil {
+		var toolOut json.RawMessage
+		if json.Valid([]byte(responseBody)) {
+			toolOut = json.RawMessage(responseBody)
+		}
+		for _, f := range e.citationScanner.ScanResponse(responseBody, toolOut) {
+			conf := "medium"
+			if f.Confidence >= 0.85 {
+				conf = "high"
+			} else if f.Confidence < 0.7 {
+				conf = "low"
+			}
+			detail.ScanResults = append(detail.ScanResults, types.ScanResult{
+				Scanner:      "citation",
+				RuleID:       f.Rule,
+				Description:  "ungrounded citation/reference",
+				MatchExcerpt: f.Reference,
+				Confidence:   conf,
+				Blocked:      false,
+			})
+		}
+	}
+
 	detail.PipelineStage = "response_clean"
 	detail.EvalDurationMs = time.Since(startTime).Seconds() * 1000
 	e.recordActiveOverrides(detail)
-	return ResponseResult{Decision: Allow, Reason: "response clean", Details: detail}
+	reason := "response clean"
+	if len(detail.ScanResults) > 0 {
+		for _, sr := range detail.ScanResults {
+			if sr.Scanner == "citation" {
+				reason = "response clean (citation warnings logged)"
+				break
+			}
+		}
+	}
+	return ResponseResult{Decision: Allow, Reason: reason, Details: detail}
 }
 
 // EvaluateResponseSimple is a backward-compatible wrapper that returns only
