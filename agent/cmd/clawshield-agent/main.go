@@ -94,23 +94,20 @@ func main() {
 				health.Status = "degraded"
 			}
 
-			clawVersion := "unknown"
-			if status.ProxyStatus != nil && status.ProxyStatus.PolicyVersion != "" {
-				clawVersion = status.ProxyStatus.PolicyVersion
-			}
-
 			req := &models.CheckinRequest{
 				AgentID:           agentID,
 				Hostname:          hostname,
-				ClawshieldVersion: clawVersion,
+				ClawshieldVersion: status.ProxyVersion(),
 				AgentVersion:      agentVersion,
 				Health:            health,
+				MetricsSummary:    status.MetricsSummary,
 			}
 
 			if status.ProxyStatus != nil {
 				req.PolicyHash = status.ProxyStatus.PolicyHash
 				req.PolicyVersion = status.ProxyStatus.PolicyVersion
 				req.UptimeSeconds = status.ProxyStatus.Uptime
+				req.EncryptionKeyID = status.EncryptionKeyID
 			}
 
 			resp, err := hubClient.Checkin(req)

@@ -12,8 +12,15 @@ import (
 func TestCollect_ProxyReachable(t *testing.T) {
 	// Create a mock proxy server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/status" {
+		switch r.URL.Path {
+		case "/api/v1/status":
+		case "/metrics":
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte("clawshield_requests_total 10\nclawshield_decisions_denied_total 2\n"))
+			return
+		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
+			return
 		}
 		status := ProxyStatus{
 			Version:       "1.0.0",
