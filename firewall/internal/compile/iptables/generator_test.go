@@ -258,14 +258,14 @@ func TestGenerate_SkipWSL2HostIPs(t *testing.T) {
 		t.Fatalf("Generate() failed: %v", err)
 	}
 	
-	// Count WSL2 host rules
+	// Count WSL2 host rules (CIDR only; resolved domain IPs may also be 172.x)
 	wsl2RuleCount := 0
 	for _, rule := range rules {
-		if strings.Contains(rule, "172.") && strings.Contains(rule, "ACCEPT") {
+		if strings.Contains(rule, "172.16.0.0/12") && strings.Contains(rule, "ACCEPT") {
 			wsl2RuleCount++
 		}
 	}
-	
+
 	// Should have exactly 1 WSL2 rule (the explicit 172.16.0.0/12 rule)
 	if wsl2RuleCount != 1 {
 		t.Errorf("expected 1 WSL2 host rule, got %d", wsl2RuleCount)
