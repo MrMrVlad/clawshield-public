@@ -115,20 +115,24 @@ func main() {
 				health.Status = "degraded"
 			}
 
+			clawVersion := "unknown"
+			if status.ProxyStatus != nil && status.ProxyStatus.Version != "" {
+				clawVersion = status.ProxyStatus.Version
+			}
+
 			req := &models.CheckinRequest{
 				AgentID:           agentID,
 				Hostname:          hostname,
-				ClawshieldVersion: status.ProxyVersion(),
+				ClawshieldVersion: clawVersion,
 				AgentVersion:      agentVersion,
 				Health:            health,
-				MetricsSummary:    status.MetricsSummary,
 			}
 
 			if status.ProxyStatus != nil {
 				req.PolicyHash = status.ProxyStatus.PolicyHash
 				req.PolicyVersion = status.ProxyStatus.PolicyVersion
 				req.UptimeSeconds = status.ProxyStatus.Uptime
-				req.EncryptionKeyID = status.EncryptionKeyID
+				req.EncryptionKeyID = readEncryptionKeyID(*encryptionKeyPath)
 			}
 
 			resp, err := hubClient.Checkin(req)
@@ -144,6 +148,24 @@ func main() {
 			}
 		}
 	}
+}
+
+func readEncryptionKeyID(path string) string {
+	if path == "" {
+		path = os.Getenv("CLAWSHIELD_AUDIT_ENCRYPTION_KEY_FILE")
+	}
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	hexKey := strings.TrimSpace(string(data))
+	if len(hexKey) >= 8 {
+		return "local-" + hexKey[:8]
+	}
+	return ""
 }
 
 func getOrEnrollAgent(hubClient *checkin.Client, enrollmentToken, agentIDFile, agentSecretFile string) (string, error) {

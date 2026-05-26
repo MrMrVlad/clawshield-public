@@ -181,10 +181,6 @@ func main() {
 				log.Printf("WARNING: policy reload failed: %v", err)
 			}),
 		}
-		if config.ShadowModeEnabled() {
-			reloaderOpts = append(reloaderOpts, config.WithShadowMode(true))
-			log.Printf("Policy shadow/canary mode enabled (CLAWSHIELD_POLICY_SHADOW)")
-		}
 		emergencyPath := filepath.Join(filepath.Dir(fullPolicyPath), "policy.emergency.yaml")
 		reloaderOpts = append(reloaderOpts, config.WithEmergencyPolicy(emergencyPath))
 		reloader := config.NewPolicyReloader(fullPolicyPath, evaluator, policyVersion, reloaderOpts...)
