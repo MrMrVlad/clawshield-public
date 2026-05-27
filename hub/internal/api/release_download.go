@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/SleuthCo/clawshield/shared/auth"
 )
+
+const maxReleaseBinaryBytes = 256 << 20 // 256 MiB
 
 // HandleDownloadReleaseBinary serves a release artifact to authenticated agents.
 // GET /api/v1/releases/{version}/binary
@@ -66,6 +69,10 @@ func (h *Hub) HandleDownloadReleaseBinary(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "release binary not found")
 		return
 	}
+	if info.Size() > maxReleaseBinaryBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "release binary too large")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Release-Version", version)
@@ -73,7 +80,16 @@ func (h *Hub) HandleDownloadReleaseBinary(w http.ResponseWriter, r *http.Request
 	if release.Signature != "" {
 		w.Header().Set("X-Binary-Signature", release.Signature)
 	}
-	http.ServeFile(w, r, artifactPath)
+	f, err := os.Open(artifactPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "release binary not found")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+	if _, err := io.Copy(w, io.LimitReader(f, maxReleaseBinaryBytes)); err != nil {
+		log.Printf("release download: %v", err)
+	}
 }
 
 func (h *Hub) verifyGETAuth(agentID string, timestamp int64, signature, path string) error {

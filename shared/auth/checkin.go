@@ -80,6 +80,9 @@ func VerifyGETRequest(secret []byte, agentID string, timestamp int64, path, sign
 	}
 	expected := SignGETRequest(secret, agentID, timestamp, path)
 	sig := strings.TrimSpace(signature)
+	if len(sig) != 64 {
+		return fmt.Errorf("invalid signature length")
+	}
 	if !hmac.Equal([]byte(expected), []byte(sig)) {
 		return fmt.Errorf("GET signature mismatch")
 	}
