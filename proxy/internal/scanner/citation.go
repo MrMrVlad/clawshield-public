@@ -51,7 +51,7 @@ func NewCitationScanner(cfg *CitationScanConfig) *CitationScanner {
 		isbnPat:       regexp.MustCompile(`(?i)\b(?:ISBN[- ]?(?:1[03])?:? )?(?:\d[- ]?){9}[\dX]\b`),
 		arxivPat:      regexp.MustCompile(`(?i)\barxiv:\d{4}\.\d{4,5}(?:v\d+)?\b`),
 		pmidPat:       regexp.MustCompile(`(?i)\bPMID:\s*\d{6,9}\b`),
-		urlPat:        regexp.MustCompile(`https?://[^\s"'<>\])+]+`),
+		urlPat:        regexp.MustCompile(`https?://[^\s"'<>]+`),
 	}
 }
 
@@ -94,6 +94,9 @@ func (c *CitationScanner) ScanResponse(responseText string, toolOutput json.RawM
 	}
 	if c.rules["url_not_in_tool"] && len(toolOutput) > 0 {
 		for _, u := range c.urlPat.FindAllString(lower, 30) {
+			if len(u) > 2048 {
+				u = u[:2048]
+			}
 			if !strings.Contains(ground, u) {
 				findings = append(findings, CitationFinding{Rule: "url_not_in_tool", Reference: u, Confidence: 0.65})
 			}
