@@ -63,6 +63,10 @@ func (h *Hub) buildBinaryUpdateAction(req *models.CheckinRequest) *models.Action
 	if err != nil || task == nil {
 		return nil
 	}
+	if !validateReleaseVersion(task.TargetVersion) {
+		log.Printf("skip binary update for agent %s: invalid target version %q", req.AgentID, task.TargetVersion)
+		return nil
+	}
 	downloadURL := fmt.Sprintf("%s/api/v1/releases/%s/binary", strings.TrimRight(h.hubBaseURL(), "/"), task.TargetVersion)
 	payload, _ := json.Marshal(sharedmodels.UpdateBinaryAction{
 		Version:     task.TargetVersion,
@@ -111,4 +115,18 @@ func ValidatePublicHubURL(raw string) error {
 		return fmt.Errorf("public hub URL must be https (or http localhost for dev)")
 	}
 	return nil
+}
+
+func validateReleaseVersion(version string) bool {
+	if version == "" || len(version) > 64 {
+		return false
+	}
+	for _, r := range version {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
