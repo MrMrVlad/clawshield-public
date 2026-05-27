@@ -8,6 +8,12 @@ import (
 	"github.com/SleuthCo/clawshield/proxy/internal/audit/crypto"
 )
 
+// dbQuerier is satisfied by *sql.DB and *sql.Tx.
+type dbQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // Options controls re-encryption behavior.
 type Options struct {
 	DryRun bool
@@ -40,16 +46,28 @@ func Run(db *sql.DB, oldKey, newKey []byte, opts Options) (*Result, error) {
 	}
 
 	res := &Result{}
-	if err := rekeyDecisions(db, oldEnc, newEnc, opts, res); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if err := rekeyDecisions(tx, oldEnc, newEnc, opts, res); err != nil {
 		return res, err
 	}
-	if err := rekeyToolCalls(db, oldEnc, newEnc, opts, res); err != nil {
+	if err := rekeyToolCalls(tx, oldEnc, newEnc, opts, res); err != nil {
+		return res, err
+	}
+	if opts.DryRun {
+		return res, nil
+	}
+	if err := tx.Commit(); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
-func rekeyDecisions(db *sql.DB, oldEnc, newEnc *crypto.FieldEncryptor, opts Options, res *Result) error {
+func rekeyDecisions(db dbQuerier, oldEnc, newEnc *crypto.FieldEncryptor, opts Options, res *Result) error {
 	rows, err := db.Query(`SELECT decision_id, decision_details, arguments_hash FROM decisions`)
 	if err != nil {
 		return err
@@ -92,7 +110,7 @@ func rekeyDecisions(db *sql.DB, oldEnc, newEnc *crypto.FieldEncryptor, opts Opti
 	return rows.Err()
 }
 
-func rekeyToolCalls(db *sql.DB, oldEnc, newEnc *crypto.FieldEncryptor, opts Options, res *Result) error {
+func rekeyToolCalls(db dbQuerier, oldEnc, newEnc *crypto.FieldEncryptor, opts Options, res *Result) error {
 	rows, err := db.Query(`SELECT rowid, request_json, response_json FROM tool_calls`)
 	if err != nil {
 		return err

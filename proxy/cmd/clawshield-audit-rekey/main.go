@@ -2,6 +2,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/SleuthCo/clawshield/proxy/internal/audit/rekey"
 	_ "github.com/mattn/go-sqlite3"
-	"database/sql"
 )
 
 func main() {
